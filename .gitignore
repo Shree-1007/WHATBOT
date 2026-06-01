@@ -2,6 +2,9 @@
 .env
 google_creds.json
 
+# Test files
+test_sheets.py
+
 # Python cache
 __pycache__/
 *.pyc
