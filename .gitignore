@@ -1,0 +1,10 @@
+# Sensitive environment variables and credentials
+.env
+google_creds.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Vercel deployment folder
+.vercel/
