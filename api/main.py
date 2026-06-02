@@ -1,18 +1,19 @@
 import os
 import json
 import gspread
-import requests
 from datetime import datetime
 from fastapi import FastAPI, Request, BackgroundTasks
 from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
 
-app = FastAPI(title="Dhaba WhatsApp Bot - Production Brain")
+app = FastAPI(title="Dhaba WhatsApp Bot - Stealth Logger")
 
 # 1. Configure Gemini securely from Environment Variables
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("⚠️ Warning: GEMINI_API_KEY is missing!")
 
 # 2. Define the Dhaba Menu & Prices
 PRICE_LIST = {
@@ -25,7 +26,6 @@ PRICE_LIST = {
 def extract_order_with_gemini(raw_text: str):
     """Uses Gemini to parse unstructured Hindi/English text into clean JSON."""
     try:
-        # Using the active model you confirmed works locally
         model = genai.GenerativeModel("gemini-2.5-flash") 
         
         prompt = f"""
@@ -48,6 +48,7 @@ def extract_order_with_gemini(raw_text: str):
         return None
 
 def calculate_total_bill(extracted_items: dict):
+    """Calculates total price based on our price list."""
     total = 0
     if not extracted_items:
         return 0
@@ -65,7 +66,6 @@ def log_to_sheets_production(customer_phone, raw_text, extracted_items, total_am
         "https://www.googleapis.com/auth/drive"
     ]
     try:
-        # Production look up: Grab stringified JSON from Vercel env
         google_creds_json = os.getenv("GOOGLE_CREDS_JSON")
         if not google_creds_json:
             print("❌ Production Sheets Error: GOOGLE_CREDS_JSON env var is empty!")
@@ -83,39 +83,28 @@ def log_to_sheets_production(customer_phone, raw_text, extracted_items, total_am
     except Exception as e:
         print(f"❌ Production Sheets Error: {e}")
 
-def send_production_reply(customer_phone, text_to_send):
-    """Sends the compiled reply back to our Render waiter link."""
-    RENDER_HELPER_URL = os.getenv("RENDER_HELPER_URL")
-    if not RENDER_HELPER_URL:
-        print("❌ Error: RENDER_HELPER_URL variable is not set yet.")
-        return
-        
-    url = f"{RENDER_HELPER_URL.rstrip('/')}/send"
-    payload = {"to": customer_phone, "message": text_to_send}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"❌ Failed to hit Render outbound channel: {e}")
-
 @app.post("/webhook")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
     customer_phone = payload.get("from")
     raw_text = payload.get("body")
     
+    # Send to background task so Vercel responds instantly
     background_tasks.add_task(process_pipeline, customer_phone, raw_text)
     return {"status": "success"}
 
 def process_pipeline(customer_phone, raw_text):
+    # 1. Ask Gemini to extract items
     extracted_items = extract_order_with_gemini(raw_text)
+    
+    # 2. SILENT FILTER: If it's a normal chat (no food), ignore it completely
     if not extracted_items:
-        send_production_reply(customer_phone, "Sorry, I couldn't catch that order clearly. Can you try again?")
+        print(f"🤫 No food detected. Ignoring message from {customer_phone}")
         return
         
+    # 3. If it IS an order, compute the bill and log to Sheets
     total_bill = calculate_total_bill(extracted_items)
     log_to_sheets_production(customer_phone, raw_text, extracted_items, total_bill)
     
-    item_lines = "\n".join([f"- {item.title()} x {qty}" for item, qty in extracted_items.items()])
-    reply_message = f"🍔 *Dhaba Order Confirmed!*\n\n*Items Ordered:*\n{item_lines}\n\n💰 *Total Amount:* Rs {total_bill}"
-    
-    send_production_reply(customer_phone, reply_message)
+    # 4. Print success to Vercel logs, but DO NOT send a WhatsApp reply
+    print(f"✅ Order from {customer_phone} silently recorded to Sheets!")
